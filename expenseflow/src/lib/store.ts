@@ -1,79 +1,243 @@
 /**
- * Demo-mode data store.
+ * Supabase-backed data store.
  * ------------------------------------------------------------------
- * All business rules (approval workflow, RBAC checks, audit logging,
- * notifications) live here so the UI stays thin. The same functions map
- * 1:1 to Supabase RPCs / Postgres functions in supabase/schema.sql.
- * State is persisted to localStorage so the demo survives reloads.
+ * Same public API as the demo store (useDB, auth, requests, admin, …),
+ * so pages/components don't need to change.
+ *  - Reads: all tables are loaded into an in-memory snapshot after login
+ *    (RLS decides what each user can see) and refreshed via Realtime.
+ *  - Writes: applied optimistically to the snapshot, then sent to Supabase
+ *    (tables + RPCs from supabase/schema.sql). On error → toast + reload.
  */
 import { useSyncExternalStore } from "react";
-import { createSeed, DB_VERSION, DEMO_PASSWORD } from "./seed";
-import type { AuditLog, Budget, Category, DB, SpendRequest, User } from "./types";
-import { formatIDR, uid } from "./utils";
-import { approvalChain, canApprove, canMarkPaid, firstStatus, isEditable, isPending, nextStatus, STATUS_META } from "./workflow";
+import { createClient, type RealtimeChannel, type SupabaseClient } from "@supabase/supabase-js";
+import { toast } from "@/components/ui/toast";
+import type { Attachment, AuditLog, Budget, Category, DB, SpendRequest, User } from "./types";
+import { uid } from "./utils";
+import { approvalChain, canApprove, canMarkPaid, firstStatus, isEditable, isPending, nextStatus } from "./workflow";
+import { formatIDR } from "./utils";
 
-const KEY = "expenseflow.db";
+/* ---------------- client ---------------- */
 
-function load(): DB {
-  try {
-    const raw = localStorage.getItem(KEY);
-    if (raw) {
-      const parsed = JSON.parse(raw) as DB;
-      if (parsed.version === DB_VERSION) return parsed;
-    }
-  } catch {
-    /* ignore corrupted storage */
-  }
-  return createSeed();
+const URL_ = import.meta.env.VITE_SUPABASE_URL as string | undefined;
+const KEY_ = import.meta.env.VITE_SUPABASE_ANON_KEY as string | undefined;
+export const supabase: SupabaseClient | null = URL_ && KEY_ ? createClient(URL_, KEY_) : null;
+
+class ActionError extends Error {}
+
+function sb(): SupabaseClient {
+  if (!supabase) throw new ActionError("Supabase belum dikonfigurasi. Isi VITE_SUPABASE_URL dan VITE_SUPABASE_ANON_KEY lalu redeploy.");
+  return supabase;
 }
 
-let db: DB = load();
-const listeners = new Set<() => void>();
+// eslint-disable-next-line @typescript-eslint/no-explicit-any
+type Row = Record<string, any>;
+function ok<T>(res: { data: T; error: unknown }): T {
+  if (res.error) throw res.error;
+  return res.data;
+}
 
-function persist() {
-  try {
-    localStorage.setItem(KEY, JSON.stringify(db));
-  } catch {
-    // Quota exceeded (large attachments) — drop inline file data and retry.
-    try {
-      const slim: DB = { ...db, requests: db.requests.map((r) => ({ ...r, attachments: r.attachments.map((a) => ({ ...a, dataUrl: undefined })) })) };
-      localStorage.setItem(KEY, JSON.stringify(slim));
-    } catch {
-      /* give up silently */
-    }
-  }
+/* ---------------- snapshot state ---------------- */
+
+const DEFAULT_SETTINGS: DB["settings"] = { highValueRuleEnabled: true, highValueThreshold: 10_000_000, emailEnabled: true, whatsappEnabled: false };
+
+function emptyDB(): DB {
+  return { version: 1, currentUserId: null, seq: 0, users: [], departments: [], categories: [], budgets: [], requests: [], approvals: [], comments: [], notifications: [], auditLogs: [], outbox: [], settings: DEFAULT_SETTINGS };
+}
+
+let db: DB = emptyDB();
+let ready = !supabase;
+const listeners = new Set<() => void>();
+const emit = () => listeners.forEach((l) => l());
+const subscribeStore = (cb: () => void) => {
+  listeners.add(cb);
+  return () => {
+    listeners.delete(cb);
+  };
+};
+
+function setDB(next: DB) {
+  db = next;
+  emit();
 }
 
 function commit(mutator: (d: DB) => void) {
   const next: DB = JSON.parse(JSON.stringify(db));
   mutator(next);
-  db = next;
-  persist();
-  listeners.forEach((l) => l());
+  setDB(next);
 }
 
 export function getDB() {
   return db;
 }
-
 export function useDB(): DB {
-  return useSyncExternalStore(
-    (cb) => {
-      listeners.add(cb);
-      return () => listeners.delete(cb);
-    },
-    () => db,
-  );
+  return useSyncExternalStore(subscribeStore, () => db);
 }
-
 export function useCurrentUser(): User | null {
   const d = useDB();
   return d.users.find((u) => u.id === d.currentUserId) ?? null;
 }
+/** false while the saved session is being restored on page load */
+export function useAuthReady(): boolean {
+  return useSyncExternalStore(subscribeStore, () => ready);
+}
+
+/* ---------------- mapping (snake_case rows → app types) ---------------- */
+
+function hue(id: string) {
+  let h = 0;
+  for (let i = 0; i < id.length; i++) h = (h * 31 + id.charCodeAt(i)) % 360;
+  return h;
+}
+
+const mapUser = (u: Row): User => ({
+  id: u.id,
+  name: u.name,
+  email: u.email,
+  phone: u.phone ?? undefined,
+  role: u.role,
+  title: u.title ?? "",
+  departmentId: u.department_id ?? "",
+  managerId: u.manager_id ?? undefined,
+  isDirector: !!u.is_director,
+  avatarHue: hue(u.id),
+  prefs: { email: !!u.notify_email, whatsapp: !!u.notify_whatsapp },
+});
+
+const mapRequest = (r: Row, attachments: Attachment[]): SpendRequest => ({
+  id: r.id,
+  code: r.code,
+  title: r.title,
+  categoryId: r.category_id,
+  amount: Number(r.amount),
+  dateNeeded: r.date_needed,
+  description: r.description ?? "",
+  vendor: r.vendor ?? "",
+  attachments,
+  priority: r.priority,
+  type: r.type,
+  status: r.status,
+  requesterId: r.requester_id,
+  departmentId: r.department_id,
+  createdAt: r.created_at,
+  updatedAt: r.updated_at,
+  submittedAt: r.submitted_at ?? undefined,
+  paidAt: r.paid_at ?? undefined,
+  paymentRef: r.payment_ref ?? undefined,
+  rejectionReason: r.rejection_reason ?? undefined,
+  revisionNote: r.revision_note ?? undefined,
+});
+
+/* ---------------- loading ---------------- */
+
+async function load() {
+  const s = sb();
+  const { data: sess } = await s.auth.getSession();
+  const authId = sess.session?.user.id;
+  if (!authId) {
+    setDB(emptyDB());
+    return;
+  }
+  const [users, departments, categories, budgets, requests, attachments, approvals, comments, notifications, audit, settings] = await Promise.all([
+    s.from("users").select("*"),
+    s.from("departments").select("*").order("name"),
+    s.from("categories").select("*").order("name"),
+    s.from("budgets").select("*"),
+    s.from("requests").select("*"),
+    s.from("request_attachments").select("*").order("created_at"),
+    s.from("approvals").select("*").order("created_at"),
+    s.from("comments").select("*").order("created_at"),
+    s.from("notifications").select("*").order("created_at", { ascending: false }).limit(100),
+    s.from("audit_logs").select("*").order("created_at", { ascending: false }).limit(500),
+    s.from("settings").select("*").eq("id", 1).maybeSingle(),
+  ]);
+  const failed = [users, departments, categories, budgets, requests, attachments, approvals, comments, notifications, audit, settings].find((r) => r.error);
+  if (failed) throw failed.error;
+
+  // Signed download links for attachments (private bucket, valid 1 hour)
+  const attRows = (attachments.data ?? []) as Row[];
+  const links = new Map<string, string>();
+  if (attRows.length) {
+    const { data } = await s.storage.from("attachments").createSignedUrls(attRows.map((a) => a.storage_path), 3600);
+    (data ?? []).forEach((d) => d.path && d.signedUrl && links.set(d.path, d.signedUrl));
+  }
+  const attByReq = new Map<string, Attachment[]>();
+  for (const a of attRows) {
+    const list = attByReq.get(a.request_id) ?? [];
+    list.push({ id: a.id, name: a.file_name, size: a.size_bytes, type: a.mime_type, dataUrl: links.get(a.storage_path) });
+    attByReq.set(a.request_id, list);
+  }
+
+  const st = settings.data as Row | null;
+  setDB({
+    version: 1,
+    currentUserId: authId,
+    seq: 0,
+    users: (users.data as Row[]).map(mapUser),
+    departments: (departments.data as Row[]).map((d) => ({ id: d.id, name: d.name })),
+    categories: (categories.data as Row[]).map((c) => ({ id: c.id, name: c.name, color: c.color, active: c.active })),
+    budgets: (budgets.data as Row[]).map((b) => ({ id: b.id, scope: b.scope, refId: b.ref_id, period: b.period, amount: Number(b.amount) })),
+    requests: (requests.data as Row[]).map((r) => mapRequest(r, attByReq.get(r.id) ?? [])),
+    approvals: (approvals.data as Row[]).map((a) => ({ id: a.id, requestId: a.request_id, step: a.step, actorId: a.actor_id, decision: a.decision, note: a.note ?? undefined, at: a.created_at })),
+    comments: (comments.data as Row[]).map((c) => ({ id: c.id, requestId: c.request_id, authorId: c.author_id, body: c.body, at: c.created_at })),
+    notifications: (notifications.data as Row[]).map((n) => ({ id: n.id, userId: n.user_id, title: n.title, body: n.body, requestId: n.request_id ?? undefined, read: n.read, at: n.created_at })),
+    auditLogs: (audit.data as Row[])
+      .map((l) => ({ id: String(l.id), at: l.created_at, actorId: l.actor_id ?? "system", action: l.action, entity: l.entity, entityId: l.entity_id ?? undefined, requestId: l.request_id ?? undefined, details: l.details ?? "" }))
+      .reverse() as AuditLog[],
+    outbox: db.outbox,
+    settings: st
+      ? { highValueRuleEnabled: st.high_value_rule_enabled, highValueThreshold: Number(st.high_value_threshold), emailEnabled: st.email_enabled, whatsappEnabled: st.whatsapp_enabled }
+      : DEFAULT_SETTINGS,
+  });
+  subscribeRealtime();
+}
+
+let inflight = 0;
+let timer: number | undefined;
+function refresh() {
+  window.clearTimeout(timer);
+  timer = window.setTimeout(() => {
+    if (inflight > 0) return refresh(); // wait until pending writes are done
+    load().catch((e) => toast.error("Gagal memuat data", errorMessage(e)));
+  }, 250);
+}
+
+/** Queue a write to Supabase (serialised so inserts land before RPCs). */
+let queue: Promise<void> = Promise.resolve();
+function remote(label: string, fn: (s: SupabaseClient) => Promise<void>) {
+  const s = sb();
+  inflight++;
+  queue = queue.then(async () => {
+    try {
+      await fn(s);
+    } catch (e) {
+      toast.error(`${label} gagal tersimpan`, errorMessage(e));
+    } finally {
+      inflight--;
+      refresh();
+    }
+  });
+}
+
+let channel: RealtimeChannel | null = null;
+function subscribeRealtime() {
+  if (!supabase || channel) return;
+  channel = supabase
+    .channel("expenseflow-changes")
+    .on("postgres_changes", { event: "*", schema: "public" }, () => refresh())
+    .subscribe();
+}
+
+// Restore saved session on page load
+if (supabase) {
+  load()
+    .catch((e) => toast.error("Gagal memuat data", errorMessage(e)))
+    .finally(() => {
+      ready = true;
+      emit();
+    });
+}
 
 /* ---------------- helpers ---------------- */
-
-class ActionError extends Error {}
 
 const now = () => new Date().toISOString();
 
@@ -83,220 +247,260 @@ function me(d: DB): User {
   return u;
 }
 
-function audit(d: DB, entry: Omit<AuditLog, "id" | "at" | "actorId"> & { actorId?: string }) {
-  d.auditLogs.push({ id: uid("log"), at: now(), actorId: entry.actorId ?? d.currentUserId ?? "system", ...entry });
-}
-
-function notify(d: DB, userId: string | undefined, title: string, body: string, requestId?: string) {
-  if (!userId) return;
-  const user = d.users.find((u) => u.id === userId);
-  if (!user) return;
-  d.notifications.push({ id: uid("nt"), userId, title, body, requestId, read: false, at: now() });
-  if (d.settings.emailEnabled && user.prefs.email) d.outbox.unshift({ id: uid("ob"), channel: "email", to: user.email, subject: title, at: now() });
-  if (d.settings.whatsappEnabled && user.prefs.whatsapp && user.phone)
-    d.outbox.unshift({ id: uid("ob"), channel: "whatsapp", to: user.phone, subject: title, at: now() });
-  d.outbox = d.outbox.slice(0, 200);
-}
-
-function notifyNextApprovers(d: DB, r: SpendRequest) {
-  const requester = d.users.find((u) => u.id === r.requesterId)!;
-  const step = approvalChain(d, r).find((c) => c.status === r.status);
-  const label = `“${r.title}” (${formatIDR(r.amount)})`;
-  if (r.status === "pending_finance") {
-    d.users.filter((u) => u.role === "finance" && u.id !== r.requesterId).forEach((u) => notify(d, u.id, "Ready for finance review", `${label} is waiting for final approval.`, r.id));
-  } else if (step?.user) {
-    const title = r.status === "pending_director" ? "High-value approval needed" : "New request to review";
-    notify(d, step.user.id, title, `${requester.name} submitted ${label}.`, r.id);
-  }
-}
-
 function getReq(d: DB, id: string) {
   const r = d.requests.find((x) => x.id === id);
   if (!r) throw new ActionError("Request not found.");
   return r;
 }
 
+async function audit(s: SupabaseClient, entry: { action: AuditLog["action"]; entity: AuditLog["entity"]; entityId?: string; requestId?: string; details: string }) {
+  ok(
+    await s.from("audit_logs").insert({
+      actor_id: db.currentUserId,
+      action: entry.action,
+      entity: entry.entity,
+      entity_id: entry.entityId && /^[0-9a-f-]{36}$/i.test(entry.entityId) ? entry.entityId : null,
+      request_id: entry.requestId ?? null,
+      details: entry.details,
+    }),
+  );
+}
+
+async function notifyUsers(s: SupabaseClient, userIds: string[], title: string, body: string, requestId?: string) {
+  const ids = [...new Set(userIds)].filter((id) => id && id !== db.currentUserId);
+  if (!ids.length) return;
+  ok(await s.from("notifications").insert(ids.map((user_id) => ({ user_id, title, body, request_id: requestId ?? null }))));
+}
+
+/** After a status change, notify whoever has to act next. (The requester is notified by the RPCs.) */
+async function notifyNext(s: SupabaseClient, row: Row) {
+  const requester = db.users.find((u) => u.id === row.requester_id);
+  const label = `${requester?.name ?? "Someone"}: “${row.title}” (${formatIDR(Number(row.amount))})`;
+  if (row.status === "pending_manager" && requester?.managerId) await notifyUsers(s, [requester.managerId], "New request to review", label, row.id);
+  if (row.status === "pending_director")
+    await notifyUsers(s, db.users.filter((u) => u.isDirector && u.id !== row.requester_id).map((u) => u.id), "High-value approval needed", label, row.id);
+  if (row.status === "pending_finance")
+    await notifyUsers(s, db.users.filter((u) => u.role === "finance" && u.id !== row.requester_id).map((u) => u.id), "Ready for finance review", label, row.id);
+}
+
+async function syncAttachments(s: SupabaseClient, requestId: string, next: Attachment[], prev: Attachment[]) {
+  const prevIds = new Set(prev.map((a) => a.id));
+  const nextIds = new Set(next.map((a) => a.id));
+  for (const a of prev.filter((x) => !nextIds.has(x.id))) {
+    const rows = ok(await s.from("request_attachments").delete().eq("id", a.id).select("storage_path")) as Row[];
+    const paths = rows.map((r) => r.storage_path);
+    if (paths.length) await s.storage.from("attachments").remove(paths);
+  }
+  for (const a of next.filter((x) => !prevIds.has(x.id))) {
+    if (!a.dataUrl) {
+      toast.error(`${a.name} tidak terupload`, "File terlalu besar untuk diproses di browser.");
+      continue;
+    }
+    const blob = await (await fetch(a.dataUrl)).blob();
+    const path = `${requestId}/${Date.now()}-${a.name.replace(/[^\w.\-]+/g, "_")}`;
+    ok(await s.storage.from("attachments").upload(path, blob, { contentType: a.type, upsert: false }));
+    ok(
+      await s.from("request_attachments").insert({ request_id: requestId, file_name: a.name, storage_path: path, size_bytes: a.size, mime_type: a.type, uploaded_by: db.currentUserId }),
+    );
+  }
+}
+
 /* ---------------- auth ---------------- */
 
 export const auth = {
-  signIn(email: string, password: string) {
-    const user = db.users.find((u) => u.email.toLowerCase() === email.trim().toLowerCase());
-    if (!user || password !== DEMO_PASSWORD) throw new ActionError("Invalid email or password.");
-    commit((d) => {
-      d.currentUserId = user.id;
-      audit(d, { action: "signed_in", entity: "auth", details: `${user.name} signed in` });
-    });
+  async signIn(email: string, password: string): Promise<User> {
+    const s = sb();
+    const { data, error } = await s.auth.signInWithPassword({ email: email.trim(), password });
+    if (error) throw new ActionError(error.message === "Invalid login credentials" ? "Email atau password salah." : error.message);
+    await load();
+    const user = db.users.find((u) => u.id === data.user.id);
+    if (!user) {
+      await s.auth.signOut();
+      setDB(emptyDB());
+      throw new ActionError("Login berhasil, tapi akun ini belum terdaftar di tabel public.users.");
+    }
+    remote("Audit log", (c) => audit(c, { action: "signed_in", entity: "auth", details: `${user.name} signed in` }));
     return user;
   },
-  switchTo(userId: string) {
-    commit((d) => {
-      d.currentUserId = userId;
-    });
+  switchTo(_userId: string) {
+    toast.info("Tidak tersedia di mode Supabase", "Sign out lalu login dengan akun lain.");
   },
   signOut() {
-    commit((d) => {
-      d.currentUserId = null;
-    });
+    setDB(emptyDB());
+    if (channel && supabase) {
+      supabase.removeChannel(channel);
+      channel = null;
+    }
+    void supabase?.auth.signOut();
   },
 };
 
 /* ---------------- requests ---------------- */
 
-export type RequestInput = Pick<
-  SpendRequest,
-  "title" | "categoryId" | "amount" | "dateNeeded" | "description" | "vendor" | "attachments" | "priority" | "type"
->;
+export type RequestInput = Pick<SpendRequest, "title" | "categoryId" | "amount" | "dateNeeded" | "description" | "vendor" | "attachments" | "priority" | "type">;
 
 export const requests = {
   save(input: RequestInput, opts: { id?: string; submit: boolean }) {
-    let resultId = opts.id ?? "";
+    const user = me(db);
+    const existing = opts.id ? getReq(db, opts.id) : undefined;
+    if (existing) {
+      if (existing.requesterId !== user.id) throw new ActionError("You can only edit your own requests.");
+      if (!isEditable(existing.status)) throw new ActionError("This request can no longer be edited.");
+    }
+    if (!user.departmentId) throw new ActionError("Akun kamu belum punya department_id di tabel users.");
+    const id = existing?.id ?? crypto.randomUUID();
+    const prevAttachments = existing?.attachments ?? [];
+
     commit((d) => {
-      const user = me(d);
-      let r: SpendRequest;
-      if (opts.id) {
-        r = getReq(d, opts.id);
-        if (r.requesterId !== user.id) throw new ActionError("You can only edit your own requests.");
-        if (!isEditable(r.status)) throw new ActionError("This request can no longer be edited.");
-        Object.assign(r, input, { updatedAt: now() });
-        audit(d, { action: "updated", entity: "request", entityId: r.id, requestId: r.id, details: "Edited request details" });
-      } else {
-        d.seq += 1;
-        r = {
-          ...input,
-          id: uid("r"),
-          code: `SR-${new Date().getFullYear().toString().slice(2)}-${String(d.seq).padStart(4, "0")}`,
-          status: "draft",
-          requesterId: user.id,
-          departmentId: user.departmentId,
-          createdAt: now(),
-          updatedAt: now(),
-        };
+      let r = d.requests.find((x) => x.id === id);
+      if (!r) {
+        r = { ...input, id, code: "SR-…", status: "draft", requesterId: user.id, departmentId: user.departmentId, createdAt: now(), updatedAt: now() };
         d.requests.push(r);
-        audit(d, { action: "created", entity: "request", entityId: r.id, requestId: r.id, details: `Created request ${r.code}` });
-      }
-      resultId = r.id;
+      } else Object.assign(r, input, { updatedAt: now() });
       if (opts.submit) {
-        const wasRevision = r.status === "revision";
         r.status = firstStatus(d, r);
         r.submittedAt = now();
         r.revisionNote = undefined;
-        audit(d, {
-          action: wasRevision ? "resubmitted" : "submitted",
-          entity: "request",
-          entityId: r.id,
-          requestId: r.id,
-          details: wasRevision ? "Resubmitted after revision" : `Submitted for approval → ${STATUS_META[r.status].label}`,
-        });
-        notifyNextApprovers(d, r);
       }
     });
-    return resultId;
+
+    remote("Request", async (s) => {
+      const row = {
+        title: input.title,
+        category_id: input.categoryId,
+        amount: input.amount,
+        date_needed: input.dateNeeded || new Date().toISOString().slice(0, 10),
+        description: input.description,
+        vendor: input.vendor,
+        priority: input.priority,
+        type: input.type,
+      };
+      if (existing) {
+        ok(await s.from("requests").update({ ...row, updated_at: now() }).eq("id", id));
+        await audit(s, { action: "updated", entity: "request", entityId: id, requestId: id, details: "Edited request details" });
+      } else {
+        ok(await s.from("requests").insert({ ...row, id, requester_id: user.id, department_id: user.departmentId, status: "draft" }));
+        await audit(s, { action: "created", entity: "request", entityId: id, requestId: id, details: `Created request “${input.title}”` });
+      }
+      await syncAttachments(s, id, input.attachments, prevAttachments);
+      if (opts.submit) {
+        const res = ok(await s.rpc("submit_request", { p_id: id })) as Row;
+        await notifyNext(s, res);
+      }
+    });
+    return id;
   },
 
   approve(id: string, note?: string) {
+    const user = me(db);
+    const r = getReq(db, id);
+    if (!canApprove(db, user, r)) throw new ActionError("You are not the approver for this step.");
+    const step = approvalChain(db, r).find((c) => c.status === r.status)?.step ?? "manager";
+    const next = nextStatus(db, r);
     commit((d) => {
-      const user = me(d);
-      const r = getReq(d, id);
-      if (!canApprove(d, user, r)) throw new ActionError("You are not the approver for this step.");
-      const step = approvalChain(d, r).find((c) => c.status === r.status)?.step ?? "manager";
-      d.approvals.push({ id: uid("ap"), requestId: r.id, step, actorId: user.id, decision: "approved", note, at: now() });
-      r.status = nextStatus(d, r);
-      r.updatedAt = now();
-      audit(d, { action: "approved", entity: "request", entityId: r.id, requestId: r.id, details: `Approved at ${step} step${note ? ` — ${note}` : ""}` });
-      if (r.status === "approved") {
-        notify(d, r.requesterId, "Request approved", `“${r.title}” is fully approved and queued for payment.`, r.id);
-      } else {
-        notify(d, r.requesterId, "Approval progress", `${user.name} approved “${r.title}”. Next: ${STATUS_META[r.status].label}.`, r.id);
-        notifyNextApprovers(d, r);
-      }
+      const x = getReq(d, id);
+      d.approvals.push({ id: uid("ap"), requestId: id, step, actorId: user.id, decision: "approved", note, at: now() });
+      x.status = next;
+      x.updatedAt = now();
+    });
+    remote("Approval", async (s) => {
+      const res = ok(await s.rpc("decide_request", { p_id: id, p_decision: "approved", p_note: note ?? null })) as Row;
+      await notifyNext(s, res);
     });
   },
 
   reject(id: string, reason: string) {
     if (!reason.trim()) throw new ActionError("A rejection reason is required.");
-    commit((d) => {
-      const user = me(d);
-      const r = getReq(d, id);
-      if (!canApprove(d, user, r)) throw new ActionError("You are not the approver for this step.");
-      const step = approvalChain(d, r).find((c) => c.status === r.status)?.step ?? "manager";
-      d.approvals.push({ id: uid("ap"), requestId: r.id, step, actorId: user.id, decision: "rejected", note: reason, at: now() });
-      r.status = "rejected";
-      r.rejectionReason = reason;
-      r.updatedAt = now();
-      audit(d, { action: "rejected", entity: "request", entityId: r.id, requestId: r.id, details: reason });
-      notify(d, r.requesterId, "Request rejected", `${user.name} rejected “${r.title}”: ${reason}`, r.id);
-    });
+    decide(id, "rejected", reason.trim());
   },
 
   requestRevision(id: string, note: string) {
     if (!note.trim()) throw new ActionError("Please describe what needs to change.");
-    commit((d) => {
-      const user = me(d);
-      const r = getReq(d, id);
-      if (!canApprove(d, user, r)) throw new ActionError("You are not the approver for this step.");
-      const step = approvalChain(d, r).find((c) => c.status === r.status)?.step ?? "manager";
-      d.approvals.push({ id: uid("ap"), requestId: r.id, step, actorId: user.id, decision: "revision", note, at: now() });
-      r.status = "revision";
-      r.revisionNote = note;
-      r.updatedAt = now();
-      audit(d, { action: "revision_requested", entity: "request", entityId: r.id, requestId: r.id, details: note });
-      notify(d, r.requesterId, "Revision requested", `${user.name} asked for changes on “${r.title}”: ${note}`, r.id);
-    });
+    decide(id, "revision", note.trim());
   },
 
   markPaid(id: string, ref: string) {
+    const user = me(db);
+    const r = getReq(db, id);
+    if (!canMarkPaid(user, r)) throw new ActionError("Only Finance can mark approved requests as paid.");
     commit((d) => {
-      const user = me(d);
-      const r = getReq(d, id);
-      if (!canMarkPaid(user, r)) throw new ActionError("Only Finance can mark approved requests as paid.");
-      r.status = "paid";
-      r.paidAt = now();
-      r.paymentRef = ref.trim() || undefined;
-      r.updatedAt = now();
-      d.approvals.push({ id: uid("ap"), requestId: r.id, step: "payment", actorId: user.id, decision: "paid", note: r.paymentRef, at: now() });
-      audit(d, { action: "paid", entity: "request", entityId: r.id, requestId: r.id, details: `Marked as paid${r.paymentRef ? ` · ref ${r.paymentRef}` : ""}` });
-      notify(d, r.requesterId, "Request paid", `“${r.title}” (${formatIDR(r.amount)}) has been paid.`, r.id);
+      const x = getReq(d, id);
+      x.status = "paid";
+      x.paidAt = now();
+      x.paymentRef = ref.trim() || undefined;
+      d.approvals.push({ id: uid("ap"), requestId: id, step: "payment", actorId: user.id, decision: "paid", note: x.paymentRef, at: now() });
+    });
+    remote("Payment", async (s) => {
+      ok(await s.rpc("mark_paid", { p_id: id, p_ref: ref.trim() || null }));
     });
   },
 
   cancel(id: string) {
+    const user = me(db);
+    const r = getReq(db, id);
+    if (r.requesterId !== user.id) throw new ActionError("Only the requester can cancel.");
+    if (!(isPending(r.status) || r.status === "revision")) throw new ActionError("Only pending requests can be cancelled.");
     commit((d) => {
-      const user = me(d);
-      const r = getReq(d, id);
-      if (r.requesterId !== user.id) throw new ActionError("Only the requester can cancel.");
-      if (!(isPending(r.status) || r.status === "revision")) throw new ActionError("Only pending requests can be cancelled.");
-      r.status = "cancelled";
-      r.updatedAt = now();
-      audit(d, { action: "cancelled", entity: "request", entityId: r.id, requestId: r.id, details: "Cancelled by requester" });
+      getReq(d, id).status = "cancelled";
+    });
+    remote("Cancel", async (s) => {
+      ok(await s.rpc("cancel_request", { p_id: id }));
     });
   },
 
   deleteDraft(id: string) {
+    const user = me(db);
+    const r = getReq(db, id);
+    if (r.requesterId !== user.id || r.status !== "draft") throw new ActionError("Only your own drafts can be deleted.");
+    const paths = r.attachments.length;
     commit((d) => {
-      const user = me(d);
-      const r = getReq(d, id);
-      if (r.requesterId !== user.id || r.status !== "draft") throw new ActionError("Only your own drafts can be deleted.");
       d.requests = d.requests.filter((x) => x.id !== id);
-      d.comments = d.comments.filter((c) => c.requestId !== id);
-      audit(d, { action: "deleted", entity: "request", entityId: id, details: `Deleted draft ${r.code} “${r.title}”` });
+    });
+    remote("Delete", async (s) => {
+      if (paths) {
+        const rows = ok(await s.from("request_attachments").select("storage_path").eq("request_id", id)) as Row[];
+        if (rows.length) await s.storage.from("attachments").remove(rows.map((x) => x.storage_path));
+      }
+      ok(await s.from("requests").delete().eq("id", id));
+      await audit(s, { action: "deleted", entity: "request", details: `Deleted draft “${r.title}”` });
     });
   },
 
   comment(id: string, body: string) {
-    if (!body.trim()) return;
+    const text = body.trim();
+    if (!text) return;
+    const user = me(db);
+    const r = getReq(db, id);
     commit((d) => {
-      const user = me(d);
-      const r = getReq(d, id);
-      d.comments.push({ id: uid("cm"), requestId: id, authorId: user.id, body: body.trim(), at: now() });
-      audit(d, { action: "commented", entity: "request", entityId: id, requestId: id, details: "Added a comment" });
-      const targets = new Set<string>([r.requesterId, ...d.comments.filter((c) => c.requestId === id).map((c) => c.authorId)]);
-      const step = approvalChain(d, r).find((c) => c.status === r.status);
-      if (step?.user) targets.add(step.user.id);
-      targets.delete(user.id);
-      targets.forEach((t) => notify(d, t, "New comment", `${user.name} on “${r.title}”: ${body.trim().slice(0, 80)}`, id));
+      d.comments.push({ id: uid("cm"), requestId: id, authorId: user.id, body: text, at: now() });
+    });
+    remote("Comment", async (s) => {
+      ok(await s.from("comments").insert({ request_id: id, author_id: user.id, body: text }));
+      await audit(s, { action: "commented", entity: "request", entityId: id, requestId: id, details: "Added a comment" });
+      const step = approvalChain(db, r).find((c) => c.status === r.status);
+      const targets = [r.requesterId, ...db.comments.filter((c) => c.requestId === id).map((c) => c.authorId), ...(step?.user ? [step.user.id] : [])];
+      await notifyUsers(s, targets, "New comment", `${user.name} on “${r.title}”: ${text.slice(0, 80)}`, id);
     });
   },
 };
+
+function decide(id: string, decision: "rejected" | "revision", note: string) {
+  const user = me(db);
+  const r = getReq(db, id);
+  if (!canApprove(db, user, r)) throw new ActionError("You are not the approver for this step.");
+  const step = approvalChain(db, r).find((c) => c.status === r.status)?.step ?? "manager";
+  commit((d) => {
+    const x = getReq(d, id);
+    d.approvals.push({ id: uid("ap"), requestId: id, step, actorId: user.id, decision, note, at: now() });
+    x.status = decision;
+    if (decision === "rejected") x.rejectionReason = note;
+    else x.revisionNote = note;
+    x.updatedAt = now();
+  });
+  remote(decision === "rejected" ? "Reject" : "Revision", async (s) => {
+    ok(await s.rpc("decide_request", { p_id: id, p_decision: decision, p_note: note }));
+  });
+}
 
 /* ---------------- notifications ---------------- */
 
@@ -306,100 +510,115 @@ export const notifications = {
       const n = d.notifications.find((x) => x.id === id);
       if (n) n.read = true;
     });
+    remote("Notification", async (s) => {
+      ok(await s.from("notifications").update({ read: true }).eq("id", id));
+    });
   },
   markAllRead() {
-    commit((d) => {
-      d.notifications.forEach((n) => {
-        if (n.userId === d.currentUserId) n.read = true;
-      });
+    const userId = db.currentUserId;
+    commit((d) => d.notifications.forEach((n) => n.userId === userId && (n.read = true)));
+    remote("Notification", async (s) => {
+      ok(await s.from("notifications").update({ read: true }).eq("user_id", userId).eq("read", false));
     });
   },
 };
 
-/* ---------------- admin ---------------- */
+/* ---------------- admin (finance only — enforced by RLS too) ---------------- */
 
-function requireFinance(d: DB) {
-  const u = me(d);
+function requireFinance() {
+  const u = me(db);
   if (u.role !== "finance") throw new ActionError("Finance/Admin permission required.");
   return u;
 }
 
 export const admin = {
   upsertCategory(c: Partial<Category> & { name: string; color: string }) {
+    requireFinance();
+    const name = c.name.trim();
+    if (!name) throw new ActionError("Category name is required.");
+    if (db.categories.some((x) => x.name.toLowerCase() === name.toLowerCase() && x.id !== c.id)) throw new ActionError("A category with this name already exists.");
+    const id = c.id ?? crypto.randomUUID();
     commit((d) => {
-      requireFinance(d);
-      const name = c.name.trim();
-      if (!name) throw new ActionError("Category name is required.");
-      if (d.categories.some((x) => x.name.toLowerCase() === name.toLowerCase() && x.id !== c.id)) throw new ActionError("A category with this name already exists.");
-      if (c.id) {
-        const ex = d.categories.find((x) => x.id === c.id)!;
-        Object.assign(ex, { name, color: c.color, active: c.active ?? ex.active });
-        audit(d, { action: "category_updated", entity: "category", entityId: ex.id, details: `Updated category “${name}”${c.active === false ? " (deactivated)" : ""}` });
-      } else {
-        const id = uid("c");
-        d.categories.push({ id, name, color: c.color, active: true });
-        audit(d, { action: "category_created", entity: "category", entityId: id, details: `Created category “${name}”` });
-      }
+      const ex = d.categories.find((x) => x.id === id);
+      if (ex) Object.assign(ex, { name, color: c.color, active: c.active ?? ex.active });
+      else d.categories.push({ id, name, color: c.color, active: true });
+    });
+    remote("Category", async (s) => {
+      if (c.id) ok(await s.from("categories").update({ name, color: c.color, active: c.active ?? true }).eq("id", id));
+      else ok(await s.from("categories").insert({ id, name, color: c.color, active: true }));
+      await audit(s, { action: c.id ? "category_updated" : "category_created", entity: "category", entityId: id, details: `${c.id ? "Updated" : "Created"} category “${name}”` });
     });
   },
   upsertBudget(b: Omit<Budget, "id"> & { id?: string }) {
+    requireFinance();
+    if (!(b.amount > 0)) throw new ActionError("Budget amount must be greater than 0.");
+    if (!b.id && db.budgets.some((x) => x.scope === b.scope && x.refId === b.refId)) throw new ActionError("This item already has a budget — edit it instead.");
+    const id = b.id ?? crypto.randomUUID();
     commit((d) => {
-      requireFinance(d);
-      if (!(b.amount > 0)) throw new ActionError("Budget amount must be greater than 0.");
-      const label = b.scope === "category" ? d.categories.find((c) => c.id === b.refId)?.name : d.departments.find((x) => x.id === b.refId)?.name;
-      if (b.id) {
-        const ex = d.budgets.find((x) => x.id === b.id)!;
-        const before = ex.amount;
-        Object.assign(ex, b);
-        audit(d, { action: "budget_updated", entity: "budget", entityId: ex.id, details: `${label}: ${formatIDR(before)} → ${formatIDR(b.amount)} (${b.period})` });
-      } else {
-        if (d.budgets.some((x) => x.scope === b.scope && x.refId === b.refId)) throw new ActionError(`${label} already has a budget — edit it instead.`);
-        const id = uid("b");
-        d.budgets.push({ ...b, id });
-        audit(d, { action: "budget_created", entity: "budget", entityId: id, details: `${label}: ${formatIDR(b.amount)} ${b.period}` });
-      }
+      const ex = d.budgets.find((x) => x.id === id);
+      if (ex) Object.assign(ex, b, { id });
+      else d.budgets.push({ ...b, id });
+    });
+    remote("Budget", async (s) => {
+      const row = { scope: b.scope, ref_id: b.refId, period: b.period, amount: b.amount };
+      if (b.id) ok(await s.from("budgets").update(row).eq("id", id));
+      else ok(await s.from("budgets").insert({ ...row, id }));
+      await audit(s, { action: b.id ? "budget_updated" : "budget_created", entity: "budget", entityId: id, details: `${formatIDR(b.amount)} ${b.period}` });
     });
   },
   deleteBudget(id: string) {
+    requireFinance();
     commit((d) => {
-      requireFinance(d);
-      const b = d.budgets.find((x) => x.id === id);
       d.budgets = d.budgets.filter((x) => x.id !== id);
-      audit(d, { action: "budget_deleted", entity: "budget", entityId: id, details: `Removed budget ${b ? formatIDR(b.amount) : ""}` });
+    });
+    remote("Budget", async (s) => {
+      ok(await s.from("budgets").delete().eq("id", id));
+      await audit(s, { action: "budget_deleted", entity: "budget", entityId: id, details: "Removed budget" });
     });
   },
   updateSettings(patch: Partial<DB["settings"]>) {
+    requireFinance();
     commit((d) => {
-      requireFinance(d);
       d.settings = { ...d.settings, ...patch };
-      audit(d, { action: "settings_updated", entity: "settings", details: Object.entries(patch).map(([k, v]) => `${k} = ${v}`).join(", ") });
+    });
+    const map: Record<string, string> = { highValueRuleEnabled: "high_value_rule_enabled", highValueThreshold: "high_value_threshold", emailEnabled: "email_enabled", whatsappEnabled: "whatsapp_enabled" };
+    const row: Row = {};
+    Object.entries(patch).forEach(([k, v]) => (row[map[k]!] = v));
+    remote("Settings", async (s) => {
+      ok(await s.from("settings").update(row).eq("id", 1));
+      await audit(s, { action: "settings_updated", entity: "settings", details: Object.entries(patch).map(([k, v]) => `${k} = ${v}`).join(", ") });
     });
   },
   logExport(what: string) {
-    commit((d) => {
-      audit(d, { action: "exported", entity: "report", details: what });
-    });
+    remote("Audit log", (s) => audit(s, { action: "exported", entity: "report", details: what }));
   },
 };
 
 export const profile = {
   updatePrefs(prefs: Partial<User["prefs"]>, phone?: string) {
+    const u = me(db);
     commit((d) => {
-      const u = me(d);
-      u.prefs = { ...u.prefs, ...prefs };
-      if (phone !== undefined) u.phone = phone;
+      const x = me(d);
+      x.prefs = { ...x.prefs, ...prefs };
+      if (phone !== undefined) x.phone = phone;
+    });
+    remote("Profile", async (s) => {
+      const row: Row = {};
+      if (prefs.email !== undefined) row.notify_email = prefs.email;
+      if (prefs.whatsapp !== undefined) row.notify_whatsapp = prefs.whatsapp;
+      if (phone !== undefined) row.phone = phone;
+      ok(await s.from("users").update(row).eq("id", u.id));
     });
   },
 };
 
+/** "Reset demo data" button → in Supabase mode just reloads from the server. */
 export function resetDemo() {
-  const current = db.currentUserId;
-  db = createSeed();
-  db.currentUserId = current;
-  persist();
-  listeners.forEach((l) => l());
+  refresh();
 }
 
 export function errorMessage(e: unknown) {
-  return e instanceof Error ? e.message : "Something went wrong.";
+  if (e instanceof Error) return e.message;
+  if (e && typeof e === "object" && "message" in e) return String((e as { message: unknown }).message);
+  return "Something went wrong.";
 }
