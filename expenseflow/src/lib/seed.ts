@@ -1,7 +1,7 @@
 import type { Approval, AuditLog, Budget, Category, Comment, DB, Department, Notification, SpendRequest, Status, User } from "./types";
 import { toISODate } from "./utils";
 
-export const DB_VERSION = 3;
+export const DB_VERSION = 4;
 export const DEMO_PASSWORD = "demo1234";
 
 const departments: Department[] = [
@@ -13,6 +13,7 @@ const departments: Department[] = [
 ];
 
 const users: User[] = [
+  { id: "u-jeremia", name: "Jeremia N Mataniari Hutabarat", email: "jeremiamataniari@gmail.com", role: "finance", isDirector: true, title: "Finance Director", departmentId: "d-fin", avatarHue: 190, prefs: { email: true, whatsapp: false } },
   { id: "u-rina", name: "Rina Wijaya", email: "rina@expenseflow.demo", phone: "+62 812-1111-2201", role: "employee", title: "Marketing Executive", departmentId: "d-mkt", managerId: "u-budi", avatarHue: 12, prefs: { email: true, whatsapp: false } },
   { id: "u-andi", name: "Andi Pratama", email: "andi@expenseflow.demo", role: "employee", title: "Software Engineer", departmentId: "d-tech", managerId: "u-budi", avatarHue: 220, prefs: { email: true, whatsapp: false } },
   { id: "u-maya", name: "Maya Kusuma", email: "maya@expenseflow.demo", role: "employee", title: "Operations Lead", departmentId: "d-ops", managerId: "u-budi", avatarHue: 280, prefs: { email: true, whatsapp: false } },
@@ -170,7 +171,7 @@ export function createSeed(): DB {
     const r = requests.find((x) => x.id === requestId)!;
     comments.push({ id: id("cm"), requestId, authorId, body, at: iso(new Date(r.createdAt).getTime() + hoursAfter * HOUR) });
   };
-  c("r-006", "u-budi", "Approved from my side — this booth is key for Q1 pipeline. Sari, needs your sign-off since it's above 10 jt.", 6);
+  c("r-006", "u-budi", "Approved from my side — this booth is key for Q1 pipeline. Needs director sign-off since it's above 10 jt.", 6);
   c("r-006", "u-rina", "Thanks Pak! Vendor needs the DP by Friday to hold the slot.", 7);
   c("r-007", "u-rina", "Noted, I'll upload the quotation from the travel agent today.", 30);
   c("r-008", "u-andi", "We're at 85% of current credits, so this is time-sensitive.", 1);
@@ -178,6 +179,11 @@ export function createSeed(): DB {
 
   const note = (userId: string, title: string, body: string, requestId: string, hoursAgo: number, read = false) =>
     notifications.push({ id: id("nt"), userId, title, body, requestId, read, at: iso(now - hoursAgo * HOUR) });
+  // Jeremia (Director + Finance)
+  note("u-jeremia", "High-value approval needed", "“Expo booth rental – ICE BSD” (Rp 18.500.000) needs director approval.", "r-006", 60);
+  note("u-jeremia", "Ready for finance review", "“AWS credits top-up” is waiting for final approval.", "r-008", 12);
+  note("u-jeremia", "Awaiting payment", "“Snacks & drinks for product launch event” is approved and ready to pay.", "r-002", 70);
+  // Others
   note("u-rina", "Revision requested", "Budi asked for changes on “Flight Jakarta–Surabaya roadshow”.", "r-007", 20);
   note("u-rina", "Request paid", "“Taxi to client meeting (SCBD)” has been paid.", "r-003", 2);
   note("u-rina", "Request rejected", "“Brochure printing for INAPA expo” was rejected by Budi.", "r-004", 150, true);
