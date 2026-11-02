@@ -1,16 +1,8 @@
 import type { Approval, AuditLog, Budget, Category, Comment, DB, Department, Notification, SpendRequest, Status, User } from "./types";
 import { toISODate } from "./utils";
 
-export const DB_VERSION = 4; // bumped so browsers reload the new accounts
-export const DEMO_PASSWORD = "demo1234"; // default for everyone without their own password
-
-// Per-user passwords. Anyone not listed here uses DEMO_PASSWORD.
-export const USER_PASSWORDS: Record<string, string> = {
-  "u-jeremia": "Lameloball23$",
-};
-export const getPassword = (userId: string): string => USER_PASSWORDS[userId] ?? DEMO_PASSWORD;
-
-const ADMIN_ID = "u-jeremia";
+export const DB_VERSION = 3;
+export const DEMO_PASSWORD = "demo1234";
 
 const departments: Department[] = [
   { id: "d-mkt", name: "Marketing" },
@@ -21,11 +13,12 @@ const departments: Department[] = [
 ];
 
 const users: User[] = [
-  { id: "u-jeremia", name: "Jeremia", email: "jeremia@yourcompany.com", role: "finance", isDirector: true, title: "Admin", departmentId: "d-fin", avatarHue: 160, prefs: { email: true, whatsapp: false } },
-  { id: "u-robby", name: "Robby", email: "robby@yourcompany.com", role: "employee", title: "Team Member", departmentId: "d-mkt", managerId: "u-jeremia", avatarHue: 12, prefs: { email: true, whatsapp: false } },
-  { id: "u-abui", name: "Abui", email: "abui@yourcompany.com", role: "employee", title: "Team Member", departmentId: "d-tech", managerId: "u-jeremia", avatarHue: 220, prefs: { email: true, whatsapp: false } },
-  { id: "u-a", name: "A", email: "a@yourcompany.com", role: "employee", title: "Team Member", departmentId: "d-ops", managerId: "u-jeremia", avatarHue: 280, prefs: { email: true, whatsapp: false } },
-  { id: "u-b", name: "B", email: "b@yourcompany.com", role: "employee", title: "Team Member", departmentId: "d-ppl", managerId: "u-jeremia", avatarHue: 40, prefs: { email: true, whatsapp: false } },
+  { id: "u-rina", name: "Rina Wijaya", email: "rina@expenseflow.demo", phone: "+62 812-1111-2201", role: "employee", title: "Marketing Executive", departmentId: "d-mkt", managerId: "u-budi", avatarHue: 12, prefs: { email: true, whatsapp: false } },
+  { id: "u-andi", name: "Andi Pratama", email: "andi@expenseflow.demo", role: "employee", title: "Software Engineer", departmentId: "d-tech", managerId: "u-budi", avatarHue: 220, prefs: { email: true, whatsapp: false } },
+  { id: "u-maya", name: "Maya Kusuma", email: "maya@expenseflow.demo", role: "employee", title: "Operations Lead", departmentId: "d-ops", managerId: "u-budi", avatarHue: 280, prefs: { email: true, whatsapp: false } },
+  { id: "u-budi", name: "Budi Santoso", email: "budi@expenseflow.demo", phone: "+62 812-1111-2202", role: "manager", title: "Head of Commercial", departmentId: "d-mkt", managerId: "u-sari", avatarHue: 160, prefs: { email: true, whatsapp: true } },
+  { id: "u-sari", name: "Sari Halim", email: "sari@expenseflow.demo", role: "manager", isDirector: true, title: "Finance & Operations Director", departmentId: "d-fin", avatarHue: 340, prefs: { email: true, whatsapp: false } },
+  { id: "u-dewi", name: "Dewi Lestari", email: "dewi@expenseflow.demo", phone: "+62 812-1111-2203", role: "finance", title: "Finance Controller", departmentId: "d-fin", managerId: "u-sari", avatarHue: 40, prefs: { email: true, whatsapp: true } },
 ];
 
 const categories: Category[] = [
@@ -70,21 +63,21 @@ interface SeedSpec {
 }
 
 const specs: SeedSpec[] = [
-  { title: "Instagram & TikTok ads – year-end campaign", cat: "c-mkt", amount: 7_500_000, by: "u-robby", status: "pending_manager", daysAgo: 1, needIn: 6, type: "advance", priority: "urgent", vendor: "Meta Platforms Ireland", desc: "Paid social budget for the December awareness campaign targeting Jabodetabek, 3-week flight.", files: ["Media plan Dec.pdf"] },
-  { title: "Snacks & drinks for product launch event", cat: "c-mkt", amount: 2_350_000, by: "u-robby", status: "approved", daysAgo: 2, needIn: 1, type: "reimbursement", vendor: "Kopi Kenangan Corporate", desc: "Catering for 60 guests at the product launch held at the Senayan office.", files: ["Receipt-launch.jpg"] },
-  { title: "Taxi to client meeting (SCBD)", cat: "c-travel", amount: 185_000, by: "u-robby", status: "paid", daysAgo: 0, needIn: 0, type: "reimbursement", vendor: "Bluebird", desc: "Round trip to PT Nusantara Retail for the Q1 campaign pitch.", files: ["Bluebird-receipt.png"] },
-  { title: "Brochure printing for INAPA expo", cat: "c-mkt", amount: 4_200_000, by: "u-robby", status: "rejected", daysAgo: 9, needIn: 7, type: "advance", vendor: "Percetakan Jaya Abadi", desc: "1.500 tri-fold brochures, art paper 150gsm.", files: ["Quotation-brochure.pdf"], reason: "Please use our existing vendor contract with PT Cetak Prima — pricing is ~20% lower." },
-  { title: "Canva Pro team subscription", cat: "c-tech", amount: 1_650_000, by: "u-robby", status: "draft", daysAgo: 0, needIn: 10, type: "advance", vendor: "Canva", desc: "Annual Canva Pro for 3 marketing seats." },
-  { title: "Expo booth rental – ICE BSD", cat: "c-mkt", amount: 18_500_000, by: "u-robby", status: "pending_finance", daysAgo: 3, needIn: 9, type: "advance", priority: "urgent", vendor: "PT Pameran Nusantara", desc: "3x6m booth incl. basic construction, electricity and 2 exhibitor passes.", files: ["Booth-quotation.pdf", "Floor-plan.png"] },
-  { title: "Flight Jakarta–Surabaya roadshow", cat: "c-travel", amount: 3_400_000, by: "u-robby", status: "revision", daysAgo: 4, needIn: 8, type: "advance", vendor: "Garuda Indonesia", desc: "Return flights for 2 people for the East Java distributor roadshow.", reason: "Please attach the flight quotation and the roadshow agenda." },
-  { title: "AWS credits top-up", cat: "c-tech", amount: 12_800_000, by: "u-abui", status: "pending_finance", daysAgo: 2, needIn: 5, type: "advance", vendor: "Amazon Web Services", desc: "Prepaid credits for staging & production workloads for the next billing cycle.", files: ["AWS-estimate.pdf"] },
-  { title: "Mechanical keyboards for dev team", cat: "c-office", amount: 3_750_000, by: "u-abui", status: "pending_manager", daysAgo: 1, needIn: 7, type: "advance", vendor: "Tokopedia – Rexus Official", desc: "5 units for new engineering hires joining this month." },
-  { title: "JetBrains IDE licenses", cat: "c-tech", amount: 6_200_000, by: "u-abui", status: "paid", daysAgo: 62, needIn: 2, type: "advance", vendor: "JetBrains s.r.o.", desc: "All Products Pack renewal for 4 engineers.", files: ["JetBrains-invoice.pdf"] },
-  { title: "Forklift maintenance – Cikarang warehouse", cat: "c-ops", amount: 9_800_000, by: "u-a", status: "approved", daysAgo: 33, needIn: 3, type: "advance", vendor: "PT Mitra Forklift", desc: "Scheduled 2,000-hour service for 2 forklifts incl. hydraulic oil replacement.", files: ["Service-quotation.pdf"] },
-  { title: "Courier services – June", cat: "c-ops", amount: 2_150_000, by: "u-a", status: "paid", daysAgo: 150, needIn: 1, type: "reimbursement", vendor: "JNE Express", desc: "Sample shipments to distributors.", files: ["JNE-statement.pdf"] },
-  { title: "Accounting software renewal", cat: "c-tech", amount: 8_900_000, by: "u-b", status: "pending_manager", daysAgo: 2, needIn: 12, type: "advance", vendor: "Jurnal by Mekari", desc: "Annual subscription renewal (Pro plan, 5 users).", files: ["Jurnal-quote.pdf"] },
-  { title: "Fire safety training for warehouse staff", cat: "c-hr", amount: 5_500_000, by: "u-a", status: "paid", daysAgo: 92, needIn: 4, type: "advance", vendor: "K3 Training Center", desc: "One-day certified training for 25 staff.", files: ["Training-invoice.pdf"] },
-  { title: "Influencer collaboration – Q3 launch", cat: "c-mkt", amount: 15_000_000, by: "u-robby", status: "paid", daysAgo: 122, needIn: 5, type: "advance", vendor: "Kreator Kolektif", desc: "3 macro-influencers, 2 reels + 3 stories each.", files: ["Influencer-SOW.pdf"] },
+  { title: "Instagram & TikTok ads – year-end campaign", cat: "c-mkt", amount: 7_500_000, by: "u-rina", status: "pending_manager", daysAgo: 1, needIn: 6, type: "advance", priority: "urgent", vendor: "Meta Platforms Ireland", desc: "Paid social budget for the December awareness campaign targeting Jabodetabek, 3-week flight.", files: ["Media plan Dec.pdf"] },
+  { title: "Snacks & drinks for product launch event", cat: "c-mkt", amount: 2_350_000, by: "u-rina", status: "approved", daysAgo: 2, needIn: 1, type: "reimbursement", vendor: "Kopi Kenangan Corporate", desc: "Catering for 60 guests at the product launch held at the Senayan office.", files: ["Receipt-launch.jpg"] },
+  { title: "Taxi to client meeting (SCBD)", cat: "c-travel", amount: 185_000, by: "u-rina", status: "paid", daysAgo: 0, needIn: 0, type: "reimbursement", vendor: "Bluebird", desc: "Round trip to PT Nusantara Retail for the Q1 campaign pitch.", files: ["Bluebird-receipt.png"] },
+  { title: "Brochure printing for INAPA expo", cat: "c-mkt", amount: 4_200_000, by: "u-rina", status: "rejected", daysAgo: 9, needIn: 7, type: "advance", vendor: "Percetakan Jaya Abadi", desc: "1.500 tri-fold brochures, art paper 150gsm.", files: ["Quotation-brochure.pdf"], reason: "Please use our existing vendor contract with PT Cetak Prima — pricing is ~20% lower." },
+  { title: "Canva Pro team subscription", cat: "c-tech", amount: 1_650_000, by: "u-rina", status: "draft", daysAgo: 0, needIn: 10, type: "advance", vendor: "Canva", desc: "Annual Canva Pro for 3 marketing seats." },
+  { title: "Expo booth rental – ICE BSD", cat: "c-mkt", amount: 18_500_000, by: "u-rina", status: "pending_director", daysAgo: 3, needIn: 9, type: "advance", priority: "urgent", vendor: "PT Pameran Nusantara", desc: "3x6m booth incl. basic construction, electricity and 2 exhibitor passes.", files: ["Booth-quotation.pdf", "Floor-plan.png"] },
+  { title: "Flight Jakarta–Surabaya roadshow", cat: "c-travel", amount: 3_400_000, by: "u-rina", status: "revision", daysAgo: 4, needIn: 8, type: "advance", vendor: "Garuda Indonesia", desc: "Return flights for 2 people for the East Java distributor roadshow.", reason: "Please attach the flight quotation and the roadshow agenda." },
+  { title: "AWS credits top-up", cat: "c-tech", amount: 12_800_000, by: "u-andi", status: "pending_finance", daysAgo: 2, needIn: 5, type: "advance", vendor: "Amazon Web Services", desc: "Prepaid credits for staging & production workloads for the next billing cycle.", files: ["AWS-estimate.pdf"] },
+  { title: "Mechanical keyboards for dev team", cat: "c-office", amount: 3_750_000, by: "u-andi", status: "pending_manager", daysAgo: 1, needIn: 7, type: "advance", vendor: "Tokopedia – Rexus Official", desc: "5 units for new engineering hires joining this month." },
+  { title: "JetBrains IDE licenses", cat: "c-tech", amount: 6_200_000, by: "u-andi", status: "paid", daysAgo: 62, needIn: 2, type: "advance", vendor: "JetBrains s.r.o.", desc: "All Products Pack renewal for 4 engineers.", files: ["JetBrains-invoice.pdf"] },
+  { title: "Forklift maintenance – Cikarang warehouse", cat: "c-ops", amount: 9_800_000, by: "u-maya", status: "approved", daysAgo: 33, needIn: 3, type: "advance", vendor: "PT Mitra Forklift", desc: "Scheduled 2,000-hour service for 2 forklifts incl. hydraulic oil replacement.", files: ["Service-quotation.pdf"] },
+  { title: "Courier services – June", cat: "c-ops", amount: 2_150_000, by: "u-maya", status: "paid", daysAgo: 150, needIn: 1, type: "reimbursement", vendor: "JNE Express", desc: "Sample shipments to distributors.", files: ["JNE-statement.pdf"] },
+  { title: "Accounting software renewal", cat: "c-tech", amount: 8_900_000, by: "u-dewi", status: "pending_manager", daysAgo: 2, needIn: 12, type: "advance", vendor: "Jurnal by Mekari", desc: "Annual subscription renewal (Pro plan, 5 users).", files: ["Jurnal-quote.pdf"] },
+  { title: "Fire safety training for warehouse staff", cat: "c-hr", amount: 5_500_000, by: "u-maya", status: "paid", daysAgo: 92, needIn: 4, type: "advance", vendor: "K3 Training Center", desc: "One-day certified training for 25 staff.", files: ["Training-invoice.pdf"] },
+  { title: "Influencer collaboration – Q3 launch", cat: "c-mkt", amount: 15_000_000, by: "u-rina", status: "paid", daysAgo: 122, needIn: 5, type: "advance", vendor: "Kreator Kolektif", desc: "3 macro-influencers, 2 reels + 3 stories each.", files: ["Influencer-SOW.pdf"] },
 ];
 
 const HOUR = 3_600_000;
@@ -135,11 +128,10 @@ export function createSeed(): DB {
     }
     const highValue = s.amount > 10_000_000;
     const managerId = requester.managerId!;
-    // Jeremia is both manager and director, so the extra director step is skipped.
     const steps: { step: Approval["step"]; actor: string; status: Status }[] = [
       { step: "manager", actor: managerId, status: "pending_manager" },
-      ...(highValue && managerId !== ADMIN_ID ? [{ step: "director" as const, actor: ADMIN_ID, status: "pending_director" as Status }] : []),
-      { step: "finance", actor: ADMIN_ID, status: "pending_finance" },
+      ...(highValue && managerId !== "u-sari" ? [{ step: "director" as const, actor: "u-sari", status: "pending_director" as Status }] : []),
+      { step: "finance", actor: "u-dewi", status: "pending_finance" },
     ];
     const reached = (st: Status) => {
       const order: Status[] = ["pending_manager", "pending_director", "pending_finance", "approved", "paid"];
@@ -167,8 +159,8 @@ export function createSeed(): DB {
       t += 20 * HOUR;
       req.paidAt = iso(t);
       req.paymentRef = `TRF-${String(880120 + i * 37)}`;
-      approvals.push({ id: id("ap"), requestId: rid, step: "payment", actorId: ADMIN_ID, decision: "paid", note: req.paymentRef, at: iso(t) });
-      log(ADMIN_ID, "paid", `Marked as paid · ref ${req.paymentRef}`);
+      approvals.push({ id: id("ap"), requestId: rid, step: "payment", actorId: "u-dewi", decision: "paid", note: req.paymentRef, at: iso(t) });
+      log("u-dewi", "paid", `Marked as paid · ref ${req.paymentRef}`);
     }
     req.updatedAt = iso(t);
     requests.push(req);
@@ -178,22 +170,23 @@ export function createSeed(): DB {
     const r = requests.find((x) => x.id === requestId)!;
     comments.push({ id: id("cm"), requestId, authorId, body, at: iso(new Date(r.createdAt).getTime() + hoursAfter * HOUR) });
   };
-  c("r-006", "u-jeremia", "Approved at manager level. This booth is key for Q1 pipeline, moving on to finance.", 6);
-  c("r-006", "u-robby", "Thanks! The vendor needs the DP by Friday to hold the slot.", 7);
-  c("r-007", "u-robby", "Noted, I'll upload the quotation from the travel agent today.", 30);
-  c("r-008", "u-abui", "We're at 85% of current credits, so this is time-sensitive.", 1);
-  c("r-004", "u-robby", "Understood, I'll re-quote with Cetak Prima.", 50);
+  c("r-006", "u-budi", "Approved from my side — this booth is key for Q1 pipeline. Sari, needs your sign-off since it's above 10 jt.", 6);
+  c("r-006", "u-rina", "Thanks Pak! Vendor needs the DP by Friday to hold the slot.", 7);
+  c("r-007", "u-rina", "Noted, I'll upload the quotation from the travel agent today.", 30);
+  c("r-008", "u-andi", "We're at 85% of current credits, so this is time-sensitive.", 1);
+  c("r-004", "u-rina", "Understood, I'll re-quote with Cetak Prima.", 50);
 
   const note = (userId: string, title: string, body: string, requestId: string, hoursAgo: number, read = false) =>
     notifications.push({ id: id("nt"), userId, title, body, requestId, read, at: iso(now - hoursAgo * HOUR) });
-  note("u-robby", "Revision requested", "Jeremia asked for changes on “Flight Jakarta–Surabaya roadshow”.", "r-007", 20);
-  note("u-robby", "Request paid", "“Taxi to client meeting (SCBD)” has been paid.", "r-003", 2);
-  note("u-robby", "Request rejected", "“Brochure printing for INAPA expo” was rejected by Jeremia.", "r-004", 150, true);
-  note("u-jeremia", "New request to review", "Robby submitted “Instagram & TikTok ads – year-end campaign”.", "r-001", 22);
-  note("u-jeremia", "New request to review", "Abui submitted “Mechanical keyboards for dev team”.", "r-009", 24);
-  note("u-jeremia", "New request to review", "B submitted “Accounting software renewal”.", "r-013", 40);
-  note("u-jeremia", "Ready for finance review", "“AWS credits top-up” is ready for finance review.", "r-008", 12);
-  note("u-jeremia", "Awaiting payment", "“Snacks & drinks for product launch event” is approved and ready to pay.", "r-002", 70, true);
+  note("u-rina", "Revision requested", "Budi asked for changes on “Flight Jakarta–Surabaya roadshow”.", "r-007", 20);
+  note("u-rina", "Request paid", "“Taxi to client meeting (SCBD)” has been paid.", "r-003", 2);
+  note("u-rina", "Request rejected", "“Brochure printing for INAPA expo” was rejected by Budi.", "r-004", 150, true);
+  note("u-budi", "New request to review", "Rina submitted “Instagram & TikTok ads – year-end campaign”.", "r-001", 22);
+  note("u-budi", "New request to review", "Andi submitted “Mechanical keyboards for dev team”.", "r-009", 24);
+  note("u-sari", "High-value approval needed", "“Expo booth rental – ICE BSD” (Rp 18.500.000) needs director approval.", "r-006", 60);
+  note("u-sari", "New request to review", "Dewi submitted “Accounting software renewal”.", "r-013", 40);
+  note("u-dewi", "Ready for finance review", "“AWS credits top-up” passed manager & director approval.", "r-008", 12);
+  note("u-dewi", "Awaiting payment", "“Snacks & drinks for product launch event” is approved and ready to pay.", "r-002", 70, true);
 
   auditLogs.sort((a, b) => a.at.localeCompare(b.at));
 
