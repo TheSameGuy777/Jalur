@@ -1,8 +1,9 @@
 import { useEffect } from "react";
+import { Loader2 } from "lucide-react";
 import { AppShell } from "@/components/layout/AppShell";
 import { Toaster } from "@/components/ui/toast";
 import { match, navigate, useRoute } from "@/lib/router";
-import { useCurrentUser } from "@/lib/store";
+import { useAuthReady, useCurrentUser } from "@/lib/store";
 import Approvals from "@/pages/Approvals";
 import Budgets from "@/pages/Budgets";
 import Dashboard from "@/pages/Dashboard";
@@ -15,19 +16,29 @@ import Settings from "@/pages/Settings";
 import { NoAccess } from "@/components/shared";
 
 export default function App() {
+  const ready = useAuthReady();
   const user = useCurrentUser();
   const { path } = useRoute();
 
   useEffect(() => {
+    if (!ready) return;
     if (!user && path !== "/login") navigate("/login", { replace: true });
     if (user && (path === "/login" || path === "/")) navigate("/dashboard", { replace: true });
-  }, [user, path]);
+  }, [ready, user, path]);
 
   useEffect(() => {
     const titles: [string, string][] = [["/dashboard", "Dashboard"], ["/requests/new", "New request"], ["/requests", "Requests"], ["/approvals", "Approvals"], ["/budgets", "Budgets"], ["/reports", "Reports"], ["/settings", "Settings"], ["/login", "Sign in"]];
     const t = titles.find(([p]) => path.startsWith(p))?.[1] ?? "ExpenseFlow";
     document.title = `${t} · ExpenseFlow`;
   }, [path]);
+
+  if (!ready) {
+    return (
+      <div className="flex min-h-dvh items-center justify-center gap-3 text-sm text-muted-foreground" role="status">
+        <Loader2 className="size-5 animate-spin" /> Loading…
+      </div>
+    );
+  }
 
   if (!user) {
     return (
