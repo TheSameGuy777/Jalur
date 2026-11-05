@@ -269,6 +269,9 @@ alter table audit_logs          enable row level security;
 -- Reference data: everyone signed in can read; finance manages
 create policy "read users"        on users       for select to authenticated using (true);
 create policy "update own prefs"  on users       for update to authenticated using (id = auth.uid());
+-- Column-level protection: users may update only their own prefs/phone, never role/dept/manager/etc.
+revoke update on public.users from authenticated;
+grant update (phone, notify_email, notify_whatsapp) on public.users to authenticated;
 create policy "read departments"  on departments for select to authenticated using (true);
 create policy "read categories"   on categories  for select to authenticated using (true);
 create policy "finance categories" on categories for all to authenticated using (is_finance()) with check (is_finance());
@@ -303,10 +306,17 @@ create policy "own notifications"    on notifications for select to authenticate
 create policy "mark own notifications" on notifications for update to authenticated using (user_id = auth.uid());
 
 create policy "finance reads audit" on audit_logs for select to authenticated using (is_finance());
+drop policy if exists "insert own audit" on audit_logs;
+create policy "insert own audit" on audit_logs for insert to authenticated with check (actor_id = auth.uid());
 
 -- Storage bucket for attachments (private)
 insert into storage.buckets (id, name, public) values ('attachments', 'attachments', false) on conflict do nothing;
+drop policy if exists "attachments read" on storage.objects;
 create policy "attachments read" on storage.objects for select to authenticated
-  using (bucket_id = 'attachments' and exists (select 1 from requests r where r.id::text = split_part(name, '/', 1)));
+  using (bucket_id = 'attachments' and exists (
+    select 1 from public.requests r
+    where r.id::text = split_part(name, '/', 1)
+      and (r.requester_id = auth.uid() or manages(r.requester_id) or is_director() or is_finance())
+  ));
 create policy "attachments upload" on storage.objects for insert to authenticated
   with check (bucket_id = 'attachments' and exists (select 1 from requests r where r.id::text = split_part(name, '/', 1) and r.requester_id = auth.uid()));

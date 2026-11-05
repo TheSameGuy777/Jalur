@@ -11,7 +11,7 @@ import { Tabs } from "@/components/ui/tabs";
 import { toast } from "@/components/ui/toast";
 import { exportCSV } from "@/lib/export";
 import { useTheme } from "@/lib/hooks";
-import { admin, errorMessage, profile, resetDemo, useDB } from "@/lib/store";
+import { admin, auth, errorMessage, profile, resetDemo, useDB } from "@/lib/store";
 import type { Category, User } from "@/lib/types";
 import { formatDateTime, formatIDR, formatThousands, parseAmount, relativeTime, todayISO } from "@/lib/utils";
 import { roleLabel } from "@/lib/workflow";
@@ -50,6 +50,10 @@ function ProfileTab({ user }: { user: User }) {
   const db = useDB();
   const { dark, toggle } = useTheme();
   const [phone, setPhone] = useState(user.phone ?? "");
+  const [currentPw, setCurrentPw] = useState("");
+  const [newPw, setNewPw] = useState("");
+  const [confirmPw, setConfirmPw] = useState("");
+  const [changingPw, setChangingPw] = useState(false);
   const [confirmReset, setConfirmReset] = useState(false);
   const dept = db.departments.find((d) => d.id === user.departmentId);
   const manager = db.users.find((u) => u.id === user.managerId);
@@ -79,6 +83,41 @@ function ProfileTab({ user }: { user: User }) {
                 {(a) => <Input {...a} type="tel" value={phone} onChange={(e) => setPhone(e.target.value)} placeholder="+62 812-0000-0000" />}
               </Field>
               <Button variant="outline" onClick={() => { profile.updatePrefs({}, phone.trim()); toast.success("Phone number saved"); }}>Save</Button>
+            </div>
+          </CardContent>
+        </Card>
+        <Card>
+          <CardHeader><div><CardTitle>Password</CardTitle><CardDescription>Change your account password.</CardDescription></div></CardHeader>
+          <CardContent className="space-y-3">
+            <Field label="Current password">
+              {(a) => <Input {...a} type="password" autoComplete="current-password" value={currentPw} onChange={(e) => setCurrentPw(e.target.value)} placeholder="••••••••" />}
+            </Field>
+            <Field label="New password" hint="At least 8 characters">
+              {(a) => <Input {...a} type="password" autoComplete="new-password" value={newPw} onChange={(e) => setNewPw(e.target.value)} placeholder="••••••••" />}
+            </Field>
+            <Field label="Confirm new password">
+              {(a) => <Input {...a} type="password" autoComplete="new-password" value={confirmPw} onChange={(e) => setConfirmPw(e.target.value)} placeholder="••••••••" />}
+            </Field>
+            <div className="flex justify-end">
+              <Button
+                disabled={changingPw || !currentPw || !newPw || !confirmPw}
+                onClick={async () => {
+                  if (newPw.length < 8) return toast.error("New password must be at least 8 characters.");
+                  if (newPw !== confirmPw) return toast.error("New passwords do not match.");
+                  setChangingPw(true);
+                  try {
+                    await auth.changePassword(currentPw, newPw);
+                    setCurrentPw(""); setNewPw(""); setConfirmPw("");
+                    toast.success("Password changed");
+                  } catch (e) {
+                    toast.error(errorMessage(e));
+                  } finally {
+                    setChangingPw(false);
+                  }
+                }}
+              >
+                {changingPw ? "Changing…" : "Change password"}
+              </Button>
             </div>
           </CardContent>
         </Card>

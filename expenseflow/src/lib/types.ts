@@ -140,6 +140,7 @@ export type AuditAction =
   | "budget_deleted"
   | "settings_updated"
   | "signed_in"
+  | "password_changed"
   | "exported";
 
 export interface AuditLog {

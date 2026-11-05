@@ -399,6 +399,7 @@ const ACTION_META: Record<AuditLog["action"], { label: string; icon: ReactNode; 
   budget_deleted: { label: "", icon: null, tone: "" },
   settings_updated: { label: "", icon: null, tone: "" },
   signed_in: { label: "", icon: null, tone: "" },
+  password_changed: { label: "", icon: null, tone: "" },
   exported: { label: "", icon: null, tone: "" },
 };
 

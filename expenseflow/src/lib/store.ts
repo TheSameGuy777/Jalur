@@ -333,6 +333,18 @@ export const auth = {
     }
     void supabase?.auth.signOut();
   },
+  async changePassword(currentPassword: string, newPassword: string): Promise<void> {
+    const s = sb();
+    const { data: sess } = await s.auth.getSession();
+    const email = sess.session?.user.email;
+    if (!email) throw new ActionError("You are not signed in.");
+    const { error: verifyErr } = await s.auth.signInWithPassword({ email, password: currentPassword });
+    if (verifyErr) throw new ActionError("Current password is incorrect.");
+    const { error } = await s.auth.updateUser({ password: newPassword });
+    if (error) throw new ActionError(error.message);
+    const user = db.users.find((u) => u.id === sess.session?.user.id);
+    remote("Audit log", (c) => audit(c, { action: "password_changed", entity: "auth", details: `${user?.name ?? email} changed password` }));
+  },
 };
 
 /* ---------------- requests ---------------- */
