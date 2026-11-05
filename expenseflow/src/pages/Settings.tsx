@@ -1,17 +1,18 @@
 import { useMemo, useState, type ReactNode } from "react";
-import { Download, Mail, MessageCircle, Pencil, Plus, RotateCcw, Search, ShieldCheck } from "lucide-react";
+import { Download, Mail, MessageCircle, Pencil, Plus, Search, ShieldCheck } from "lucide-react";
 import { PageHeader } from "@/components/shared";
+import { Dialog } from "@/components/ui/dialog";
 import { Avatar } from "@/components/ui/avatar";
 import { Badge } from "@/components/ui/badge";
 import { Button } from "@/components/ui/button";
 import { Card, CardContent, CardDescription, CardHeader, CardTitle } from "@/components/ui/card";
-import { Dialog } from "@/components/ui/dialog";
+
 import { Field, Input, Select, Switch } from "@/components/ui/form";
 import { Tabs } from "@/components/ui/tabs";
 import { toast } from "@/components/ui/toast";
 import { exportCSV } from "@/lib/export";
 import { useTheme } from "@/lib/hooks";
-import { admin, auth, errorMessage, profile, resetDemo, useDB } from "@/lib/store";
+import { admin, auth, errorMessage, profile, useDB } from "@/lib/store";
 import type { Category, User } from "@/lib/types";
 import { formatDateTime, formatIDR, formatThousands, parseAmount, relativeTime, todayISO } from "@/lib/utils";
 import { roleLabel } from "@/lib/workflow";
@@ -54,7 +55,6 @@ function ProfileTab({ user }: { user: User }) {
   const [newPw, setNewPw] = useState("");
   const [confirmPw, setConfirmPw] = useState("");
   const [changingPw, setChangingPw] = useState(false);
-  const [confirmReset, setConfirmReset] = useState(false);
   const dept = db.departments.find((d) => d.id === user.departmentId);
   const manager = db.users.find((u) => u.id === user.managerId);
   return (
@@ -122,26 +122,12 @@ function ProfileTab({ user }: { user: User }) {
           </CardContent>
         </Card>
         <Card>
-          <CardHeader><div><CardTitle>Appearance & demo</CardTitle></div></CardHeader>
+          <CardHeader><div><CardTitle>Appearance</CardTitle></div></CardHeader>
           <CardContent className="divide-y divide-border">
             <Pref title="Dark mode" desc="Easier on the eyes at night" checked={dark} onChange={toggle} />
-            <div className="flex items-center justify-between gap-4 py-4">
-              <div>
-                <p className="text-sm font-medium">Reset demo data</p>
-                <p className="text-sm text-muted-foreground">Restore the original seeded requests, budgets and notifications.</p>
-              </div>
-              <Button variant="destructive-outline" onClick={() => setConfirmReset(true)}><RotateCcw /> Reset</Button>
-            </div>
           </CardContent>
         </Card>
       </div>
-      <Dialog
-        open={confirmReset}
-        onClose={() => setConfirmReset(false)}
-        title="Reset all demo data?"
-        description="All requests, comments and changes made in this browser will be replaced with the original sample data."
-        footer={<><Button variant="outline" onClick={() => setConfirmReset(false)}>Cancel</Button><Button variant="destructive" onClick={() => { resetDemo(); setConfirmReset(false); toast.success("Demo data restored"); }}>Reset data</Button></>}
-      />
     </div>
   );
 }

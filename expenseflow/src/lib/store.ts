@@ -266,23 +266,6 @@ async function audit(s: SupabaseClient, entry: { action: AuditLog["action"]; ent
   );
 }
 
-async function notifyUsers(s: SupabaseClient, userIds: string[], title: string, body: string, requestId?: string) {
-  const ids = [...new Set(userIds)].filter((id) => id && id !== db.currentUserId);
-  if (!ids.length) return;
-  ok(await s.from("notifications").insert(ids.map((user_id) => ({ user_id, title, body, request_id: requestId ?? null }))));
-}
-
-/** After a status change, notify whoever has to act next. (The requester is notified by the RPCs.) */
-async function notifyNext(s: SupabaseClient, row: Row) {
-  const requester = db.users.find((u) => u.id === row.requester_id);
-  const label = `${requester?.name ?? "Someone"}: “${row.title}” (${formatIDR(Number(row.amount))})`;
-  if (row.status === "pending_manager" && requester?.managerId) await notifyUsers(s, [requester.managerId], "New request to review", label, row.id);
-  if (row.status === "pending_director")
-    await notifyUsers(s, db.users.filter((u) => u.isDirector && u.id !== row.requester_id).map((u) => u.id), "High-value approval needed", label, row.id);
-  if (row.status === "pending_finance")
-    await notifyUsers(s, db.users.filter((u) => u.role === "finance" && u.id !== row.requester_id).map((u) => u.id), "Ready for finance review", label, row.id);
-}
-
 async function syncAttachments(s: SupabaseClient, requestId: string, next: Attachment[], prev: Attachment[]) {
   const prevIds = new Set(prev.map((a) => a.id));
   const nextIds = new Set(next.map((a) => a.id));
@@ -396,8 +379,7 @@ export const requests = {
       }
       await syncAttachments(s, id, input.attachments, prevAttachments);
       if (opts.submit) {
-        const res = ok(await s.rpc("submit_request", { p_id: id })) as Row;
-        await notifyNext(s, res);
+        ok(await s.rpc("submit_request", { p_id: id }));
       }
     });
     return id;
@@ -416,8 +398,7 @@ export const requests = {
       x.updatedAt = now();
     });
     remote("Approval", async (s) => {
-      const res = ok(await s.rpc("decide_request", { p_id: id, p_decision: "approved", p_note: note ?? null })) as Row;
-      await notifyNext(s, res);
+      ok(await s.rpc("decide_request", { p_id: id, p_decision: "approved", p_note: note ?? null }));
     });
   },
 
@@ -491,7 +472,7 @@ export const requests = {
       await audit(s, { action: "commented", entity: "request", entityId: id, requestId: id, details: "Added a comment" });
       const step = approvalChain(db, r).find((c) => c.status === r.status);
       const targets = [r.requesterId, ...db.comments.filter((c) => c.requestId === id).map((c) => c.authorId), ...(step?.user ? [step.user.id] : [])];
-      await notifyUsers(s, targets, "New comment", `${user.name} on “${r.title}”: ${text.slice(0, 80)}`, id);
+      ok(await s.rpc("notify_participants", { p_request: id, p_targets: targets, p_title: "New comment", p_body: `${user.name} on “${r.title}”: ${text.slice(0, 80)}` }));
     });
   },
 };
@@ -623,11 +604,6 @@ export const profile = {
     });
   },
 };
-
-/** "Reset demo data" button → in Supabase mode just reloads from the server. */
-export function resetDemo() {
-  refresh();
-}
 
 export function errorMessage(e: unknown) {
   if (e instanceof Error) return e.message;
