@@ -107,6 +107,8 @@ src/
 supabase/       schema.sql (tables, RLS, RPCs, storage), seed.sql
 ```
 
+sup
+
 ## Scripts
 
 `npm run dev` · `npm run build` · `npm run preview` · `npm run typecheck`
